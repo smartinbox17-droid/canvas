@@ -1,12 +1,13 @@
 FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache gcc musl-dev sqlite-dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/yingce-backend ./cmd/server && \
-    CGO_ENABLED=0 go build -o /out/migrate-schema ./cmd/migrate-schema
+RUN CGO_ENABLED=1 go build -o /out/yingce-backend ./cmd/server && \
+    CGO_ENABLED=1 go build -o /out/migrate-schema ./cmd/migrate-schema
 
-FROM node:22.19-alpine
+FROM node:22-alpine
 RUN apk add --no-cache ffmpeg ca-certificates
 WORKDIR /app
 COPY --from=builder /out/yingce-backend /usr/local/bin/yingce-backend
