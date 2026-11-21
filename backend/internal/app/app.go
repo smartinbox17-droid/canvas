@@ -10,6 +10,7 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/auth"
 	"github.com/smartinbox17-droid/canvas/backend/internal/canvas"
 	"github.com/smartinbox17-droid/canvas/backend/internal/database"
+	"github.com/smartinbox17-droid/canvas/backend/internal/ecommerce"
 	"github.com/smartinbox17-droid/canvas/backend/internal/generation"
 	"github.com/smartinbox17-droid/canvas/backend/internal/outbound"
 	"github.com/smartinbox17-droid/canvas/backend/internal/payment"
@@ -36,6 +37,7 @@ type Application struct {
 	Skills      *skills.Service
 	Agent       *agent.Service
 	Production  *production.Service
+	Ecommerce   *ecommerce.Service
 	ready       atomic.Bool
 }
 
@@ -75,6 +77,8 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 
 	canvasSvc := canvas.NewService(db)
 	agentSvc := agent.NewService(db, canvasSvc)
+	ecomSvc := ecommerce.NewService(db, canvasSvc)
+	_ = ecomSvc.BootstrapKnowledge(context.Background())
 
 	a := &Application{
 		Config:      cfg,
@@ -91,6 +95,7 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		Skills:      skillsSvc,
 		Agent:       agentSvc,
 		Production:  production.NewService(db, canvasSvc),
+		Ecommerce:   ecomSvc,
 	}
 	a.ready.Store(true)
 	return a, nil

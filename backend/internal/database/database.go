@@ -119,6 +119,19 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 8,
+		Name:    "008_phase8_9_previs_ecommerce_teams",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.EcommerceProject{},
+				&model.EcommerceKnowledgeEntry{},
+				&model.PrevisScene{},
+				&model.Team{},
+				&model.TeamMembership{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {

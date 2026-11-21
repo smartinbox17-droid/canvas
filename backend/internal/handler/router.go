@@ -123,6 +123,16 @@ func (h *Handler) NewRouter() *gin.Engine {
 				authed.GET("/dramas/:id", h.handleGetDrama)
 				authed.POST("/dramas/:id/start", h.handleStartDramaOrchestrator)
 				authed.POST("/dramas/:id/episodes/:episodeId/jianying-draft", h.handleExportJianyingDraft)
+
+				authed.GET("/ecommerce/knowledge/entries", h.handleListEcommerceKnowledge)
+				authed.GET("/ecommerce/projects", h.handleListEcommerceProjects)
+				authed.POST("/ecommerce/projects", h.handleCreateEcommerceProject)
+
+				authed.GET("/previs/scenes", h.handleListPrevisScenes)
+				authed.POST("/previs/scenes", h.handleCreatePrevisScene)
+
+				authed.GET("/teams", h.handleListTeams)
+				authed.POST("/teams", h.handleCreateTeam)
 			}
 
 			admin := v1.Group("/admin")

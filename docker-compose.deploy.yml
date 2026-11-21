@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: canvas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-canvas_prod_password}
+      POSTGRES_DB: canvas
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canvas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["/usr/local/bin/migrate-schema", "up"]
+    environment:
+      CANVAS_DATABASE_DRIVER: postgres
+      DATABASE_URL: postgres://canvas:${POSTGRES_PASSWORD:-canvas_prod_password}@postgres:5432/canvas?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  yingce-agent:
+    build:
+      context: ./yingce-agent
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    environment:
+      YINGCE_AGENT_PORT: "8090"
+      YINGCE_AGENT_TOKEN: ${YINGCE_AGENT_TOKEN:-prod_agent_token}
+      YINGCE_AGENT_MAX_SESSIONS: "8"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      CANVAS_BACKEND_ADDR: ":8080"
+      CANVAS_DATABASE_DRIVER: postgres
+      DATABASE_URL: postgres://canvas:${POSTGRES_PASSWORD:-canvas_prod_password}@postgres:5432/canvas?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      CANVAS_AUTO_MIGRATE: "false"
+      CANVAS_REGISTRATION_ENABLED: ${CANVAS_REGISTRATION_ENABLED:-true}
+      YINGCE_AGENT_URL: http://yingce-agent:8090
+      YINGCE_AGENT_TOKEN: ${YINGCE_AGENT_TOKEN:-prod_agent_token}
+    volumes:
+      - canvasdata:/app/data
+      - /run/open-ai-canvas-updater:/run/open-ai-canvas-updater
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      yingce-agent:
+        condition: service_started
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
+  canvasdata:

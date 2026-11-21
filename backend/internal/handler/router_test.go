@@ -685,13 +685,73 @@ func TestPhase7DramaPipelineTailFrameChainingAndJianyingDraft(t *testing.T) {
 	}
 }
 
+func TestPhase8And9PrevisEcommerceAndTeams(t *testing.T) {
+	_, router := newTestApp(t)
+	cookie := registerUser(t, router, "studio_lead@example.com", "password123")
+
+	// 1. Create a 3D Previs scene -> exports white-model & depth video and writes node back to user's Infinite Canvas
+	previsBody, _ := json.Marshal(map[string]any{
+		"title":         "赛博雨夜高架桥 3D 预演",
+		"cityPreset":    "cyberpunk_blocks",
+		"weather":       "neon_night",
+		"cameraRecipe":  "dolly_zoom",
+		"characterPose": "umbrella_stand",
+	})
+	pvReq := httptest.NewRequest(http.MethodPost, "/api/v1/previs/scenes", bytes.NewReader(previsBody))
+	pvReq.Header.Set("Content-Type", "application/json")
+	pvReq.AddCookie(cookie)
+	pvRec := httptest.NewRecorder()
+	router.ServeHTTP(pvRec, pvReq)
+	if pvRec.Code != http.StatusOK || !strings.Contains(pvRec.Body.String(), "depth.mp4") {
+		t.Fatalf("create previs scene failed (%d): %s", pvRec.Code, pvRec.Body.String())
+	}
+
+	// 2. Query offline E-commerce knowledge base and run 5-step compliant E-commerce project (8%-92% safe zone)
+	kbReq := httptest.NewRequest(http.MethodGet, "/api/v1/ecommerce/knowledge/entries?platform=amazon", nil)
+	kbReq.AddCookie(cookie)
+	kbRec := httptest.NewRecorder()
+	router.ServeHTTP(kbRec, kbReq)
+	if kbRec.Code != http.StatusOK || !strings.Contains(kbRec.Body.String(), "8%-92%") {
+		t.Fatalf("list ecommerce knowledge failed (%d): %s", kbRec.Code, kbRec.Body.String())
+	}
+
+	ecBody, _ := json.Marshal(map[string]any{
+		"productName":    "AI 智能降噪耳机 Pro",
+		"categoryCode":   "consumer_electronics",
+		"targetPlatform": "amazon",
+		"regionCasting":  "north_america",
+	})
+	ecReq := httptest.NewRequest(http.MethodPost, "/api/v1/ecommerce/projects", bytes.NewReader(ecBody))
+	ecReq.Header.Set("Content-Type", "application/json")
+	ecReq.AddCookie(cookie)
+	ecRec := httptest.NewRecorder()
+	router.ServeHTTP(ecRec, ecReq)
+	if ecRec.Code != http.StatusOK || !strings.Contains(ecRec.Body.String(), `"safeAreaMargin":"8%-92%"`) {
+		t.Fatalf("create ecommerce project failed (%d): %s", ecRec.Code, ecRec.Body.String())
+	}
+
+	// 3. Create 2-tier Team workspace (Company -> Sub-group) with shared credit pool
+	teamBody, _ := json.Marshal(map[string]any{
+		"name":             "影策 AIGC 制作中心",
+		"poolMicrocredits": int64(5_000_000_000),
+	})
+	tmReq := httptest.NewRequest(http.MethodPost, "/api/v1/teams", bytes.NewReader(teamBody))
+	tmReq.Header.Set("Content-Type", "application/json")
+	tmReq.AddCookie(cookie)
+	tmRec := httptest.NewRecorder()
+	router.ServeHTTP(tmRec, tmReq)
+	if tmRec.Code != http.StatusOK || !strings.Contains(tmRec.Body.String(), "影策 AIGC 制作中心") {
+		t.Fatalf("create team failed (%d): %s", tmRec.Code, tmRec.Body.String())
+	}
+}
+
 func TestArchitectureLayering(t *testing.T) {
 	forbidden := []string{
 		"github.com/smartinbox17-droid/canvas/backend/internal/app",
 		"github.com/smartinbox17-droid/canvas/backend/internal/service",
 		"github.com/smartinbox17-droid/canvas/backend/internal/handler",
 	}
-	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas", "../skills", "../agent", "../production"}
+	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas", "../skills", "../agent", "../production", "../ecommerce"}
 	fset := token.NewFileSet()
 
 	for _, dir := range pkgs {
