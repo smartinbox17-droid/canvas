@@ -1,0 +1,55 @@
+{
+  "apiVersion": "yingce.plugin/v2",
+  "id": "mock-echo",
+  "name": "Local Mock Multimodal Provider",
+  "version": "1.0.0",
+  "author": "AI Canvas Workbench",
+  "description": "Local zero-cost mock provider for CI and development testing.",
+  "permissions": ["generation.run"],
+  "configuration": {
+    "fields": [
+      {
+        "name": "apiKey",
+        "type": "secret",
+        "label": "Mock API Key",
+        "required": false
+      }
+    ]
+  },
+  "contributes": {
+    "providers": [
+      {
+        "id": "mock",
+        "label": "Mock Multimodal (Text / Image / Video)",
+        "capabilities": ["text", "image", "video"],
+        "scopes": ["admin.system-channel", "user.custom-channel", "canvas", "creation", "agent"],
+        "baseUrl": "http://localhost:8080/api/mock-upstream",
+        "requiresPublicMediaUrls": false,
+        "auth": { "type": "bearer", "field": "apiKey" },
+        "request": {
+          "create": {
+            "method": "POST",
+            "path": "/v1/generations",
+            "contentType": "application/json",
+            "body": {
+              "model": { "$ref": "request.model" },
+              "prompt": { "$ref": "request.prompt" },
+              "capability": { "$ref": "request.capability" }
+            }
+          },
+          "poll": {
+            "method": "GET",
+            "path": "/v1/generations/{{taskId}}"
+          }
+        },
+        "response": {
+          "taskId": { "$ref": "response.id" },
+          "status": { "$coalesce": [{ "$ref": "response.status" }, "succeeded"] },
+          "images": { "$ref": "response.images" },
+          "videos": { "$ref": "response.videos" },
+          "text": { "$ref": "response.text" }
+        }
+      }
+    ]
+  }
+}

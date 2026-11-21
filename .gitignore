@@ -1,0 +1,12 @@
+.env
+data/
+dist/
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+backend/yingce-backend
+backend/migrate-schema
+web/dist/
+web/.vite/
+.DS_Store
