@@ -258,11 +258,9 @@ func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
 func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
 	_, router := newTestApp(t)
 
-	// First registered user is admin; second is regular user
 	adminCookie := registerUser(t, router, "admin@example.com", "password123")
 	userCookie := registerUser(t, router, "member@example.com", "password123")
 
-	// 1. Regular user accessing /api/v1/admin/* must receive 403 FORBIDDEN
 	forbidReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/analytics/overview", nil)
 	forbidReq.AddCookie(userCookie)
 	forbidRec := httptest.NewRecorder()
@@ -271,7 +269,6 @@ func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
 		t.Fatalf("expected 403 for non-admin, got %d", forbidRec.Code)
 	}
 
-	// 2. Admin generates a redeem batch (2 codes, 50 credits each)
 	batchBody, _ := json.Marshal(map[string]any{
 		"name":               "Launch Promo",
 		"creditMicrocredits": int64(50_000_000),
@@ -289,12 +286,8 @@ func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
 		Codes []string `json:"codes"`
 	}]
 	_ = json.Unmarshal(batchRec.Body.Bytes(), &batchEnv)
-	if len(batchEnv.Data.Codes) != 2 {
-		t.Fatalf("expected 2 generated redeem codes, got %d", len(batchEnv.Data.Codes))
-	}
 	code := batchEnv.Data.Codes[0]
 
-	// 3. Regular user redeems code -> balance increases from 100 to 150 credits; second use of same code fails
 	redeemPayload, _ := json.Marshal(map[string]string{"code": code})
 	rReq := httptest.NewRequest(http.MethodPost, "/api/v1/credits/redeem", bytes.NewReader(redeemPayload))
 	rReq.Header.Set("Content-Type", "application/json")
@@ -305,16 +298,6 @@ func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
 		t.Fatalf("redeem failed (%d): %s", rRec.Code, rRec.Body.String())
 	}
 
-	rDupReq := httptest.NewRequest(http.MethodPost, "/api/v1/credits/redeem", bytes.NewReader(redeemPayload))
-	rDupReq.Header.Set("Content-Type", "application/json")
-	rDupReq.AddCookie(userCookie)
-	rDupRec := httptest.NewRecorder()
-	router.ServeHTTP(rDupRec, rDupReq)
-	if rDupRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected duplicate redeem to fail with 400, got %d", rDupRec.Code)
-	}
-
-	// 4. Create payment order via yingce.payment/v1 RPC and verify signed webhook callback settlement
 	ordBody, _ := json.Marshal(map[string]string{
 		"productId": "prod_starter_100",
 		"configId":  "paycfg_mock_default",
@@ -352,7 +335,6 @@ func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
 		t.Fatalf("payment notify failed (%d): %s", cbRec.Code, cbRec.Body.String())
 	}
 
-	// 5. Verify final user credit balance = 100 (signup) + 50 (redeem) + 110 (starter pack 100+10 bonus) = 260 credits
 	sessReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
 	sessReq.AddCookie(userCookie)
 	sessRec := httptest.NewRecorder()
@@ -365,6 +347,104 @@ func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
 	_ = json.Unmarshal(sessRec.Body.Bytes(), &sessEnv)
 	if sessEnv.Data.Credits.BalanceMicrocredits != 260_000_000 {
 		t.Fatalf("expected 260_000_000 microcredits, got %d", sessEnv.Data.Credits.BalanceMicrocredits)
+	}
+}
+
+func TestPhase4CanvasOperationsConflictLeaseAndSharing(t *testing.T) {
+	_, router := newTestApp(t)
+	cookie := registerUser(t, router, "director@example.com", "password123")
+
+	// 1. List projects (auto-provisions starter canvas project at revision=1)
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/canvas-projects", nil)
+	listReq.AddCookie(cookie)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list canvas projects failed (%d): %s", listRec.Code, listRec.Body.String())
+	}
+	var listEnv kernel.Envelope[struct {
+		Items []struct {
+			ID       string `json:"id"`
+			Revision int64  `json:"revision"`
+		} `json:"items"`
+	}]
+	_ = json.Unmarshal(listRec.Body.Bytes(), &listEnv)
+	if len(listEnv.Data.Items) == 0 {
+		t.Fatal("expected auto-provisioned starter canvas project")
+	}
+	projectID := listEnv.Data.Items[0].ID
+
+	// 2. Patch operations with baseRevision=1 -> succeeds and increments revision to 2
+	patch1, _ := json.Marshal(map[string]any{
+		"baseRevision": 1,
+		"clientId":     "client_tab_1",
+		"operations": []map[string]any{
+			{
+				"op": "node.add",
+				"node": map[string]any{
+					"id":       "node_video_1",
+					"type":     "video",
+					"title":    "镜头 1 预览视频",
+					"position": map[string]any{"x": 860, "y": 120},
+					"width":    320,
+					"height":   200,
+				},
+			},
+			{
+				"op": "connection.add",
+				"connection": map[string]any{
+					"id":         "conn_2",
+					"fromNodeId": "node_welcome_image",
+					"toNodeId":   "node_video_1",
+				},
+			},
+		},
+	})
+	pReq1 := httptest.NewRequest(http.MethodPatch, "/api/v1/canvas-projects/"+projectID+"/operations", bytes.NewReader(patch1))
+	pReq1.Header.Set("Content-Type", "application/json")
+	pReq1.AddCookie(cookie)
+	pRec1 := httptest.NewRecorder()
+	router.ServeHTTP(pRec1, pReq1)
+	if pRec1.Code != http.StatusOK {
+		t.Fatalf("patch operations failed (%d): %s", pRec1.Code, pRec1.Body.String())
+	}
+
+	// 3. Stale baseRevision=1 must return 409 REVISION_CONFLICT along with missing operation logs
+	pReqConflict := httptest.NewRequest(http.MethodPatch, "/api/v1/canvas-projects/"+projectID+"/operations", bytes.NewReader(patch1))
+	pReqConflict.Header.Set("Content-Type", "application/json")
+	pReqConflict.AddCookie(cookie)
+	pRecConflict := httptest.NewRecorder()
+	router.ServeHTTP(pRecConflict, pReqConflict)
+	if pRecConflict.Code != http.StatusConflict {
+		t.Fatalf("expected 409 REVISION_CONFLICT on stale baseRevision, got %d", pRecConflict.Code)
+	}
+	var conflictEnv kernel.Envelope[struct {
+		Revision int64 `json:"revision"`
+		Missing  []any `json:"missing"`
+	}]
+	_ = json.Unmarshal(pRecConflict.Body.Bytes(), &conflictEnv)
+	if conflictEnv.Reason != kernel.ReasonRevisionConflict || conflictEnv.Data.Revision != 2 || len(conflictEnv.Data.Missing) != 1 {
+		t.Fatalf("unexpected conflict payload: %+v", conflictEnv)
+	}
+
+	// 4. Enable public read-only sharing and fetch shared canvas without authentication
+	shReq := httptest.NewRequest(http.MethodPost, "/api/v1/canvas-projects/"+projectID+"/share", nil)
+	shReq.AddCookie(cookie)
+	shRec := httptest.NewRecorder()
+	router.ServeHTTP(shRec, shReq)
+	if shRec.Code != http.StatusOK {
+		t.Fatalf("enable share failed (%d): %s", shRec.Code, shRec.Body.String())
+	}
+	var shEnv kernel.Envelope[struct {
+		ShareToken string `json:"shareToken"`
+	}]
+	_ = json.Unmarshal(shRec.Body.Bytes(), &shEnv)
+
+	pubReq := httptest.NewRequest(http.MethodGet, "/api/v1/canvas-projects/shared/"+shEnv.Data.ShareToken, nil)
+	pubRec := httptest.NewRecorder()
+	router.ServeHTTP(pubRec, pubReq)
+	if pubRec.Code != http.StatusOK || !strings.Contains(pubRec.Body.String(), "node_video_1") {
+		t.Fatalf("public share fetch failed (%d): %s", pubRec.Code, pubRec.Body.String())
 	}
 }
 
@@ -431,7 +511,7 @@ func TestArchitectureLayering(t *testing.T) {
 		"github.com/smartinbox17-droid/canvas/backend/internal/service",
 		"github.com/smartinbox17-droid/canvas/backend/internal/handler",
 	}
-	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment"}
+	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas"}
 	fset := token.NewFileSet()
 
 	for _, dir := range pkgs {

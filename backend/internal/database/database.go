@@ -82,6 +82,15 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 5,
+		Name:    "005_phase4_canvas_operation_logs",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.CanvasOperationLog{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {
