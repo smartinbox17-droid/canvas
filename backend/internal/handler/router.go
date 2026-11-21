@@ -15,6 +15,7 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/generation"
 	"github.com/smartinbox17-droid/canvas/backend/internal/kernel"
 	"github.com/smartinbox17-droid/canvas/backend/internal/model"
+	"github.com/smartinbox17-droid/canvas/backend/internal/payment"
 	"github.com/smartinbox17-droid/canvas/backend/internal/protocol"
 	"github.com/smartinbox17-droid/canvas/backend/internal/service"
 )
@@ -43,7 +44,6 @@ func (h *Handler) NewRouter() *gin.Engine {
 			health.GET("/ready", h.handleReady)
 		}
 
-		// Local built-in mock upstream for zero-cost development and CI testing
 		mockUp := api.Group("/mock-upstream")
 		{
 			mockUp.POST("/v1/generations", h.handleMockUpstreamCreate)
@@ -62,6 +62,9 @@ func (h *Handler) NewRouter() *gin.Engine {
 			}
 
 			v1.GET("/models", h.handleListLogicalModels)
+			v1.GET("/payments/products", h.handleListPaymentProducts)
+			v1.GET("/payments/providers", h.handleListPaymentProviders)
+			v1.POST("/payments/notify/:providerId/:configId", h.handlePaymentNotify)
 
 			authed := v1.Group("")
 			authed.Use(h.requireAuth())
@@ -79,6 +82,21 @@ func (h *Handler) NewRouter() *gin.Engine {
 				authed.GET("/tasks/:id", h.handleGetTask)
 				authed.POST("/tasks/:id/cancel", h.handleCancelTask)
 				authed.GET("/tasks/:id/text-events", h.handleTaskTextEventsSSE)
+
+				authed.GET("/payments/orders", h.handleListPaymentOrders)
+				authed.POST("/payments/orders", h.handleCreatePaymentOrder)
+				authed.POST("/credits/redeem", h.handleRedeemCode)
+				authed.GET("/credits/ledger", h.handleListUserLedger)
+			}
+
+			admin := v1.Group("/admin")
+			admin.Use(h.requireAuth(), h.requireAdmin())
+			{
+				admin.GET("/analytics/overview", h.handleAdminOverview)
+				admin.GET("/users", h.handleAdminListUsers)
+				admin.GET("/billing-orders", h.handleAdminListBillingOrders)
+				admin.GET("/redeem-batches", h.handleAdminListRedeemBatches)
+				admin.POST("/redeem-batches", h.handleAdminCreateRedeemBatch)
 			}
 		}
 	}
@@ -198,6 +216,152 @@ func (h *Handler) handleListLogicalModels(c *gin.Context) {
 	kernel.OK(c, gin.H{"items": models})
 }
 
+func (h *Handler) handleListPaymentProducts(c *gin.Context) {
+	items, err := h.app.Payment.ListProducts(c.Request.Context())
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"items": items})
+}
+
+func (h *Handler) handleListPaymentProviders(c *gin.Context) {
+	items, err := h.app.Payment.ListProviders(c.Request.Context())
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"items": items})
+}
+
+func (h *Handler) handleListPaymentOrders(c *gin.Context) {
+	user := currentUser(c)
+	items, err := h.app.Payment.ListUserOrders(c.Request.Context(), user.ID)
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"items": items})
+}
+
+type createPaymentOrderReq struct {
+	ProductID string `json:"productId"`
+	ConfigID  string `json:"configId"`
+}
+
+func (h *Handler) handleCreatePaymentOrder(c *gin.Context) {
+	user := currentUser(c)
+	var req createPaymentOrderReq
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.ProductID) == "" {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, "productId is required"))
+		return
+	}
+	notifyURL := h.app.Config.PublicBaseURL + "/api/v1/payments/notify"
+	returnURL := h.app.Config.PublicBaseURL + "/billing"
+	order, checkout, err := h.app.Payment.CreateOrder(c.Request.Context(), user.ID, req.ProductID, req.ConfigID, notifyURL, returnURL, c.ClientIP())
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"order": order, "checkout": checkout})
+}
+
+func (h *Handler) handlePaymentNotify(c *gin.Context) {
+	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
+	if err != nil {
+		c.String(http.StatusBadRequest, "fail")
+		return
+	}
+	ack, err := h.app.Payment.HandleNotification(c.Request.Context(), c.Param("providerId"), c.Param("configId"), c.Request.Header, rawBody)
+	if err != nil {
+		c.String(http.StatusBadRequest, "fail: "+err.Error())
+		return
+	}
+	c.String(http.StatusOK, ack)
+}
+
+type redeemReq struct {
+	Code string `json:"code"`
+}
+
+func (h *Handler) handleRedeemCode(c *gin.Context) {
+	user := currentUser(c)
+	var req redeemReq
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Code) == "" {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, "code is required"))
+		return
+	}
+	acc, err := h.app.Payment.Redeem(c.Request.Context(), user.ID, req.Code)
+	if err != nil {
+		if errors.Is(err, payment.ErrInvalidRedeem) {
+			kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, err.Error()))
+			return
+		}
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"credits": acc})
+}
+
+func (h *Handler) handleListUserLedger(c *gin.Context) {
+	user := currentUser(c)
+	var items []model.CreditLedger
+	_ = h.app.DB.WithContext(c.Request.Context()).
+		Where("user_id = ?", user.ID).
+		Order("created_at DESC").
+		Limit(50).
+		Find(&items).Error
+	kernel.OK(c, gin.H{"items": items})
+}
+
+func (h *Handler) handleAdminOverview(c *gin.Context) {
+	ov, err := h.app.Payment.GetAdminOverview(c.Request.Context())
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, ov)
+}
+
+func (h *Handler) handleAdminListUsers(c *gin.Context) {
+	var users []model.User
+	_ = h.app.DB.WithContext(c.Request.Context()).Order("created_at DESC").Limit(100).Find(&users).Error
+	kernel.OK(c, gin.H{"items": users})
+}
+
+func (h *Handler) handleAdminListBillingOrders(c *gin.Context) {
+	var orders []model.BillingOrder
+	_ = h.app.DB.WithContext(c.Request.Context()).Order("created_at DESC").Limit(100).Find(&orders).Error
+	kernel.OK(c, gin.H{"items": orders})
+}
+
+func (h *Handler) handleAdminListRedeemBatches(c *gin.Context) {
+	var batches []model.RedeemBatch
+	_ = h.app.DB.WithContext(c.Request.Context()).Order("created_at DESC").Limit(50).Find(&batches).Error
+	kernel.OK(c, gin.H{"items": batches})
+}
+
+type createRedeemBatchReq struct {
+	Name               string `json:"name"`
+	CreditMicrocredits int64  `json:"creditMicrocredits"`
+	Count              int    `json:"count"`
+}
+
+func (h *Handler) handleAdminCreateRedeemBatch(c *gin.Context) {
+	user := currentUser(c)
+	var req createRedeemBatchReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, "invalid json payload"))
+		return
+	}
+	batch, codes, err := h.app.Payment.CreateRedeemBatch(c.Request.Context(), user.ID, req.Name, req.CreditMicrocredits, req.Count)
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"batch": batch, "codes": codes})
+}
+
 type taskSubmitPayload struct {
 	CreationSubmissionID string                     `json:"creationSubmissionId"`
 	ProjectID            string                     `json:"projectId"`
@@ -303,7 +467,6 @@ func (h *Handler) handleCancelTask(c *gin.Context) {
 	kernel.OK(c, gin.H{"task": task})
 }
 
-// handleTaskTextEventsSSE streams cursor-based text events supporting Last-Event-ID or ?afterSeq= resumption.
 func (h *Handler) handleTaskTextEventsSSE(c *gin.Context) {
 	user := currentUser(c)
 	afterSeq := 0
@@ -495,6 +658,18 @@ func (h *Handler) requireAuth() gin.HandlerFunc {
 			return
 		}
 		c.Set(ctxUserKey, user)
+		c.Next()
+	}
+}
+
+func (h *Handler) requireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user := currentUser(c)
+		if user == nil || user.Role != "admin" {
+			kernel.Fail(c, kernel.NewError(http.StatusForbidden, 403, kernel.ReasonForbidden, "admin role required"))
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

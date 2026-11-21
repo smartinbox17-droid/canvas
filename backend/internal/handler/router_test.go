@@ -20,6 +20,7 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/handler"
 	"github.com/smartinbox17-droid/canvas/backend/internal/kernel"
 	"github.com/smartinbox17-droid/canvas/backend/internal/outbound"
+	"github.com/smartinbox17-droid/canvas/backend/internal/payment"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
 	"github.com/smartinbox17-droid/canvas/backend/internal/protocol"
 	"github.com/smartinbox17-droid/canvas/backend/internal/service"
@@ -148,7 +149,6 @@ func TestPhase1AuthIsolationAndAssetReferenceGuard(t *testing.T) {
 }
 
 func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
-	// 1. Verify $-expression DSL operators ($ref, $coalesce, $omitEmpty, $toString, $filter, $sortByOrder, $if, $len)
 	scope := map[string]any{
 		"request": map[string]any{
 			"model":       "sora-2",
@@ -189,7 +189,6 @@ func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
 		t.Fatalf("expected $filter to keep 1 non-mask image, got %d", len(refs))
 	}
 
-	// 2. End-to-end task submission, idempotency, worker lease claim, mock plugin execution, billing settlement, and SSE text-events
 	app, router := newTestApp(t)
 	srv := httptest.NewServer(router)
 	defer srv.Close()
@@ -227,7 +226,6 @@ func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
 		t.Fatalf("unexpected task response: %+v", env1.Data)
 	}
 
-	// Idempotent duplicate submission returns exact same task without double-reserving credits
 	reqDup := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", bytes.NewReader(submitBody))
 	reqDup.Header.Set("Content-Type", "application/json")
 	reqDup.AddCookie(cookie)
@@ -239,7 +237,6 @@ func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
 		t.Fatalf("idempotency broken: expected %s, got %v", taskID, envDup.Data["task"]["id"])
 	}
 
-	// Claim and execute via worker
 	processed, err := app.Generation.ProcessNextTask(context.Background())
 	if err != nil || processed == nil {
 		t.Fatalf("ProcessNextTask failed: %v", err)
@@ -248,7 +245,6 @@ func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
 		t.Fatalf("expected task succeeded, got %s (error=%s)", processed.Status, processed.Error)
 	}
 
-	// Verify SSE text-events stream with Last-Event-ID cursor resumption
 	sseReq := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/"+taskID+"/text-events", nil)
 	sseReq.Header.Set("Last-Event-ID", "1")
 	sseReq.AddCookie(cookie)
@@ -256,6 +252,119 @@ func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
 	router.ServeHTTP(sseRec, sseReq)
 	if sseRec.Code != http.StatusOK || !strings.Contains(sseRec.Body.String(), "event: done") {
 		t.Fatalf("unexpected SSE output (%d): %s", sseRec.Code, sseRec.Body.String())
+	}
+}
+
+func TestPhase3PaymentRPCSettlementRedeemAndAdminRBAC(t *testing.T) {
+	_, router := newTestApp(t)
+
+	// First registered user is admin; second is regular user
+	adminCookie := registerUser(t, router, "admin@example.com", "password123")
+	userCookie := registerUser(t, router, "member@example.com", "password123")
+
+	// 1. Regular user accessing /api/v1/admin/* must receive 403 FORBIDDEN
+	forbidReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/analytics/overview", nil)
+	forbidReq.AddCookie(userCookie)
+	forbidRec := httptest.NewRecorder()
+	router.ServeHTTP(forbidRec, forbidReq)
+	if forbidRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-admin, got %d", forbidRec.Code)
+	}
+
+	// 2. Admin generates a redeem batch (2 codes, 50 credits each)
+	batchBody, _ := json.Marshal(map[string]any{
+		"name":               "Launch Promo",
+		"creditMicrocredits": int64(50_000_000),
+		"count":              2,
+	})
+	batchReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/redeem-batches", bytes.NewReader(batchBody))
+	batchReq.Header.Set("Content-Type", "application/json")
+	batchReq.AddCookie(adminCookie)
+	batchRec := httptest.NewRecorder()
+	router.ServeHTTP(batchRec, batchReq)
+	if batchRec.Code != http.StatusOK {
+		t.Fatalf("create redeem batch failed (%d): %s", batchRec.Code, batchRec.Body.String())
+	}
+	var batchEnv kernel.Envelope[struct {
+		Codes []string `json:"codes"`
+	}]
+	_ = json.Unmarshal(batchRec.Body.Bytes(), &batchEnv)
+	if len(batchEnv.Data.Codes) != 2 {
+		t.Fatalf("expected 2 generated redeem codes, got %d", len(batchEnv.Data.Codes))
+	}
+	code := batchEnv.Data.Codes[0]
+
+	// 3. Regular user redeems code -> balance increases from 100 to 150 credits; second use of same code fails
+	redeemPayload, _ := json.Marshal(map[string]string{"code": code})
+	rReq := httptest.NewRequest(http.MethodPost, "/api/v1/credits/redeem", bytes.NewReader(redeemPayload))
+	rReq.Header.Set("Content-Type", "application/json")
+	rReq.AddCookie(userCookie)
+	rRec := httptest.NewRecorder()
+	router.ServeHTTP(rRec, rReq)
+	if rRec.Code != http.StatusOK {
+		t.Fatalf("redeem failed (%d): %s", rRec.Code, rRec.Body.String())
+	}
+
+	rDupReq := httptest.NewRequest(http.MethodPost, "/api/v1/credits/redeem", bytes.NewReader(redeemPayload))
+	rDupReq.Header.Set("Content-Type", "application/json")
+	rDupReq.AddCookie(userCookie)
+	rDupRec := httptest.NewRecorder()
+	router.ServeHTTP(rDupRec, rDupReq)
+	if rDupRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected duplicate redeem to fail with 400, got %d", rDupRec.Code)
+	}
+
+	// 4. Create payment order via yingce.payment/v1 RPC and verify signed webhook callback settlement
+	ordBody, _ := json.Marshal(map[string]string{
+		"productId": "prod_starter_100",
+		"configId":  "paycfg_mock_default",
+	})
+	ordReq := httptest.NewRequest(http.MethodPost, "/api/v1/payments/orders", bytes.NewReader(ordBody))
+	ordReq.Header.Set("Content-Type", "application/json")
+	ordReq.AddCookie(userCookie)
+	ordRec := httptest.NewRecorder()
+	router.ServeHTTP(ordRec, ordReq)
+	if ordRec.Code != http.StatusOK {
+		t.Fatalf("create payment order failed (%d): %s", ordRec.Code, ordRec.Body.String())
+	}
+	var ordEnv kernel.Envelope[struct {
+		Order struct {
+			OutTradeNo  string `json:"outTradeNo"`
+			AmountCents int64  `json:"amountCents"`
+		} `json:"order"`
+	}]
+	_ = json.Unmarshal(ordRec.Body.Bytes(), &ordEnv)
+	outTradeNo := ordEnv.Data.Order.OutTradeNo
+	amt := ordEnv.Data.Order.AmountCents
+
+	sign := payment.SignCallback("mock_pay_hmac_secret", outTradeNo, amt, "paid")
+	cbPayload, _ := json.Marshal(map[string]any{
+		"outTradeNo":      outTradeNo,
+		"providerTradeNo": "wx_trade_999",
+		"status":          "paid",
+		"amountCents":     amt,
+		"sign":            sign,
+	})
+	cbReq := httptest.NewRequest(http.MethodPost, "/api/v1/payments/notify/official-payment-epay/paycfg_mock_default", bytes.NewReader(cbPayload))
+	cbRec := httptest.NewRecorder()
+	router.ServeHTTP(cbRec, cbReq)
+	if cbRec.Code != http.StatusOK || cbRec.Body.String() != "success" {
+		t.Fatalf("payment notify failed (%d): %s", cbRec.Code, cbRec.Body.String())
+	}
+
+	// 5. Verify final user credit balance = 100 (signup) + 50 (redeem) + 110 (starter pack 100+10 bonus) = 260 credits
+	sessReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	sessReq.AddCookie(userCookie)
+	sessRec := httptest.NewRecorder()
+	router.ServeHTTP(sessRec, sessReq)
+	var sessEnv kernel.Envelope[struct {
+		Credits struct {
+			BalanceMicrocredits int64 `json:"balanceMicrocredits"`
+		} `json:"credits"`
+	}]
+	_ = json.Unmarshal(sessRec.Body.Bytes(), &sessEnv)
+	if sessEnv.Data.Credits.BalanceMicrocredits != 260_000_000 {
+		t.Fatalf("expected 260_000_000 microcredits, got %d", sessEnv.Data.Credits.BalanceMicrocredits)
 	}
 }
 
@@ -322,7 +431,7 @@ func TestArchitectureLayering(t *testing.T) {
 		"github.com/smartinbox17-droid/canvas/backend/internal/service",
 		"github.com/smartinbox17-droid/canvas/backend/internal/handler",
 	}
-	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation"}
+	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment"}
 	fset := token.NewFileSet()
 
 	for _, dir := range pkgs {

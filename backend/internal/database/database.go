@@ -68,6 +68,20 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 4,
+		Name:    "004_phase3_billing_payments_redeem_admin",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.PaymentProduct{},
+				&model.PaymentProviderConfig{},
+				&model.PaymentOrder{},
+				&model.RedeemBatch{},
+				&model.RedeemCode{},
+				&model.ReferralCommission{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {

@@ -10,6 +10,7 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/database"
 	"github.com/smartinbox17-droid/canvas/backend/internal/generation"
 	"github.com/smartinbox17-droid/canvas/backend/internal/outbound"
+	"github.com/smartinbox17-droid/canvas/backend/internal/payment"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
 	"github.com/smartinbox17-droid/canvas/backend/internal/repository"
 	"github.com/smartinbox17-droid/canvas/backend/internal/storage"
@@ -26,6 +27,7 @@ type Application struct {
 	Auth        *auth.Service
 	Assets      *assets.Service
 	Generation  *generation.Service
+	Payment     *payment.Service
 	ready       atomic.Bool
 }
 
@@ -57,6 +59,9 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		httpClient = outbound.NewSafeHTTPClient(outbound.NewGuardConfig(cfg.AllowPrivateUpstreams, cfg.AllowedPrivateHosts))
 	}
 
+	paySvc := payment.NewService(db, secretBox)
+	_ = paySvc.BootstrapDefaults(context.Background())
+
 	a := &Application{
 		Config:      cfg,
 		DB:          db,
@@ -67,6 +72,7 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		Auth:        auth.NewService(db),
 		Assets:      assets.NewService(db, localStore),
 		Generation:  generation.NewService(db, coord, secretBox, httpClient),
+		Payment:     paySvc,
 	}
 	a.ready.Store(true)
 	return a, nil

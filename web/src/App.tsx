@@ -5,12 +5,16 @@ import {
   Alert,
   Button,
   Card,
+  Col,
   ConfigProvider,
   Form,
   Input,
+  InputNumber,
   List,
+  Row,
   Select,
   Space,
+  Statistic,
   Tag,
   Upload,
   message,
@@ -20,6 +24,7 @@ import { useTranslation } from "react-i18next";
 import { http, ApiError } from "@/services/api/request";
 import { authApi, assetsApi } from "@/services/api/auth-assets";
 import { tasksApi } from "@/services/api/tasks";
+import { billingApi } from "@/services/api/billing";
 import { clearAccountStorage } from "@/lib/storage/account-storage";
 import { useAppStore } from "@/stores/app-store";
 
@@ -80,6 +85,7 @@ function UserLayout() {
         <Link to="/tasks">任务中心 (Task Center)</Link>
         <Link to="/canvas">{t("nav.canvas")}</Link>
         <Link to="/assets">素材库 (Assets)</Link>
+        <Link to="/billing">充值与账单 (Billing)</Link>
         <Link to="/drama">{t("nav.drama")}</Link>
         <Link to="/admin">{t("nav.admin")}</Link>
       </aside>
@@ -123,6 +129,212 @@ function UserLayout() {
           <Outlet />
         </main>
       </div>
+    </div>
+  );
+}
+
+function BillingPage() {
+  const queryClient = useQueryClient();
+  const [redeemInput, setRedeemInput] = useState("");
+  const [lastCodeUrl, setLastCodeUrl] = useState<string | null>(null);
+
+  const productsQuery = useQuery({
+    queryKey: ["billing", "products"],
+    queryFn: () => billingApi.listProducts(),
+  });
+  const ledgerQuery = useQuery({
+    queryKey: ["billing", "ledger"],
+    queryFn: () => billingApi.listLedger(),
+  });
+
+  const buyMutation = useMutation({
+    mutationFn: (productId: string) => billingApi.createOrder(productId),
+    onSuccess: (res) => {
+      setLastCodeUrl(res.checkout.codeUrl ?? null);
+      void message.success(`订单已创建: ${res.order.outTradeNo}`);
+    },
+  });
+
+  const redeemMutation = useMutation({
+    mutationFn: () => billingApi.redeemCode(redeemInput),
+    onSuccess: () => {
+      setRedeemInput("");
+      void message.success("兑换成功，积分已入账");
+      void queryClient.invalidateQueries({ queryKey: ["auth", "session"] });
+      void queryClient.invalidateQueries({ queryKey: ["billing", "ledger"] });
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        void message.error(err.message);
+      }
+    },
+  });
+
+  return (
+    <Space direction="vertical" style={{ width: "100%" }} size="large">
+      <Card title="兑换码充值 (Redeem Code)">
+        <Space>
+          <Input
+            style={{ width: 280 }}
+            value={redeemInput}
+            onChange={(e) => setRedeemInput(e.target.value)}
+            placeholder="输入兑换码 (如 YC-XXXXXXXXXXXX)"
+          />
+          <Button
+            type="primary"
+            disabled={!redeemInput.trim()}
+            loading={redeemMutation.isPending}
+            onClick={() => redeemMutation.mutate()}
+          >
+            立即兑换
+          </Button>
+        </Space>
+      </Card>
+
+      <Card title="在线购买积分套餐 (yingce.payment/v1 RPC)">
+        {lastCodeUrl && (
+          <Alert
+            type="info"
+            style={{ marginBottom: 16 }}
+            message={`扫码支付链接已生成: ${lastCodeUrl}`}
+          />
+        )}
+        <Row gutter={16}>
+          {(productsQuery.data?.items ?? []).map((p) => (
+            <Col span={12} key={p.id}>
+              <Card title={p.title}>
+                <p>价格: ¥{(p.amountCents / 100).toFixed(2)}</p>
+                <p>
+                  到账: {((p.creditMicrocredits + p.bonusMicrocredits) / 1_000_000).toFixed(0)} 积分
+                </p>
+                <Button type="primary" onClick={() => buyMutation.mutate(p.id)}>
+                  创建支付订单
+                </Button>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      </Card>
+
+      <Card title="微积分账本流水 (Credit Ledger)">
+        <List
+          dataSource={ledgerQuery.data?.items ?? []}
+          locale={{ emptyText: "暂无流水" }}
+          renderItem={(entry) => (
+            <List.Item>
+              <List.Item.Meta
+                title={
+                  <Space>
+                    <Tag color={entry.delta >= 0 ? "green" : "volcano"}>{entry.kind}</Tag>
+                    <span>
+                      变动: {entry.delta >= 0 ? "+" : ""}
+                      {(entry.delta / 1_000_000).toFixed(2)} 积分
+                    </span>
+                  </Space>
+                }
+                description={`变动后余额: ${(entry.balanceAfter / 1_000_000).toFixed(2)} · 关联: ${entry.refType}/${entry.refId}`}
+              />
+            </List.Item>
+          )}
+        />
+      </Card>
+    </Space>
+  );
+}
+
+function AdminShell() {
+  const queryClient = useQueryClient();
+  const [generatedCodes, setGeneratedCodes] = useState<string[]>([]);
+
+  const overviewQuery = useQuery({
+    queryKey: ["admin", "overview"],
+    queryFn: () => billingApi.getAdminOverview(),
+    retry: false,
+  });
+
+  const batchesQuery = useQuery({
+    queryKey: ["admin", "redeem-batches"],
+    queryFn: () => billingApi.listRedeemBatches(),
+    retry: false,
+  });
+
+  const createBatchMutation = useMutation({
+    mutationFn: (v: { name: string; credits: number; count: number }) =>
+      billingApi.createRedeemBatch(v.name, v.credits * 1_000_000, v.count),
+    onSuccess: (res) => {
+      setGeneratedCodes(res.codes);
+      void message.success(`已生成 ${res.codes.length} 个兑换码`);
+      void queryClient.invalidateQueries({ queryKey: ["admin", "redeem-batches"] });
+      void queryClient.invalidateQueries({ queryKey: ["admin", "overview"] });
+    },
+  });
+
+  const ov = overviewQuery.data;
+
+  return (
+    <div className="app-shell">
+      <aside className="app-sidebar">
+        <strong>Admin Console</strong>
+        <Link to="/admin">运营总览 & 兑换码</Link>
+        <Link to="/">返回创作工作台</Link>
+      </aside>
+      <main className="app-content">
+        <Space direction="vertical" style={{ width: "100%" }} size="large">
+          <h2>运营管理后台 (Phase 3 Admin Console)</h2>
+          {overviewQuery.isError && (
+            <Alert type="warning" message="请使用管理员账号（首个注册账号）登录访问管理后台" />
+          )}
+          {ov && (
+            <Row gutter={16}>
+              <Col span={6}>
+                <Card><Statistic title="总注册用户" value={ov.totalUsers} /></Card>
+              </Col>
+              <Col span={6}>
+                <Card><Statistic title="总生成任务 / 成功" value={`${ov.totalTasks} / ${ov.succeededTasks}`} /></Card>
+              </Col>
+              <Col span={6}>
+                <Card><Statistic title="已付充值金额 (元)" value={(ov.totalRevenueCents / 100).toFixed(2)} /></Card>
+              </Col>
+              <Col span={6}>
+                <Card><Statistic title="兑换码批次" value={ov.totalRedeemBatches} /></Card>
+              </Col>
+            </Row>
+          )}
+
+          <Card title="批量生成兑换码 (Redeem Code Generator)">
+            <Form
+              layout="inline"
+              initialValues={{ name: "活动批次", credits: 50, count: 5 }}
+              onFinish={(v) => createBatchMutation.mutate(v)}
+            >
+              <Form.Item name="name" label="批次名"><Input /></Form.Item>
+              <Form.Item name="credits" label="单码积分"><InputNumber min={1} /></Form.Item>
+              <Form.Item name="count" label="数量"><InputNumber min={1} max={100} /></Form.Item>
+              <Button type="primary" htmlType="submit" loading={createBatchMutation.isPending}>
+                生成兑换码
+              </Button>
+            </Form>
+            {generatedCodes.length > 0 && (
+              <Alert
+                type="success"
+                style={{ marginTop: 16 }}
+                message={`最新生成兑换码: ${generatedCodes.join(", ")}`}
+              />
+            )}
+            <List
+              style={{ marginTop: 16 }}
+              dataSource={batchesQuery.data?.items ?? []}
+              renderItem={(b) => (
+                <List.Item>
+                  <span>
+                    <strong>{b.name}</strong> · 单码 {(b.creditMicrocredits / 1_000_000).toFixed(0)} 积分 · 已用 {b.usedCount}/{b.totalCount}
+                  </span>
+                </List.Item>
+              )}
+            />
+          </Card>
+        </Space>
+      </main>
     </div>
   );
 }
@@ -387,28 +599,12 @@ function AssetsPage() {
   );
 }
 
-function AdminShell() {
-  return (
-    <div className="app-shell">
-      <aside className="app-sidebar">
-        <strong>Admin Console</strong>
-        <Link to="/admin">Overview</Link>
-        <Link to="/">Back to Workspace</Link>
-      </aside>
-      <main className="app-content">
-        <h2>Admin Console Shell</h2>
-        <p>Channels, Logical Models, Users, Billing Orders, and System Settings mount here.</p>
-      </main>
-    </div>
-  );
-}
-
 function CanvasStagePlaceholder({ title }: { title: string }) {
   return (
     <div className="canvas-stage">
       <div>
         <h2>{title}</h2>
-        <p>Phase 2 Protocol Router & Task Center active. Infinite Canvas DOM + Leafer-UI layer mounts in Phase 4.</p>
+        <p>Phase 3 Billing, Payment RPC & Admin Console active. Infinite Canvas Engine mounts next in Phase 4.</p>
       </div>
     </div>
   );
@@ -434,6 +630,7 @@ export function App() {
             <Route path="tasks" element={<TaskCenterPage />} />
             <Route path="login" element={<LoginPage />} />
             <Route path="assets" element={<AssetsPage />} />
+            <Route path="billing" element={<BillingPage />} />
             <Route path="canvas" element={<CanvasStagePlaceholder title="Infinite Canvas Engine" />} />
             <Route path="drama" element={<CanvasStagePlaceholder title="Short Drama Production Pipeline" />} />
           </Route>
