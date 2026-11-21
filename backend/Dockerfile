@@ -1,4 +1,5 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:alpine AS builder
+ENV GOTOOLCHAIN=auto
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /src/backend
 COPY backend/go.mod backend/go.sum ./
