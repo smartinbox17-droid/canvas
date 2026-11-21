@@ -27,6 +27,7 @@ import { tasksApi } from "@/services/api/tasks";
 import { billingApi } from "@/services/api/billing";
 import { InfiniteCanvasBoard } from "@/components/canvas/InfiniteCanvasBoard";
 import { AgentSkillsMcpStudio } from "@/components/agent/AgentSkillsMcpStudio";
+import { DramaProductionStudio } from "@/components/drama/DramaProductionStudio";
 import { clearAccountStorage } from "@/lib/storage/account-storage";
 import { useAppStore } from "@/stores/app-store";
 
@@ -635,7 +636,7 @@ export function App() {
             <Route path="billing" element={<BillingPage />} />
             <Route path="canvas" element={<InfiniteCanvasBoard />} />
             <Route path="agent" element={<AgentSkillsMcpStudio />} />
-            <Route path="drama" element={<CanvasStagePlaceholder title="Short Drama Production Pipeline" />} />
+            <Route path="drama" element={<DramaProductionStudio />} />
           </Route>
           <Route path="admin/*" element={<AdminShell />} />
         </Routes>

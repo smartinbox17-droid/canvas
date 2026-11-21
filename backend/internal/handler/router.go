@@ -117,6 +117,12 @@ func (h *Handler) NewRouter() *gin.Engine {
 
 				authed.GET("/mcp/servers", h.handleListMCPServers)
 				authed.POST("/mcp/servers", h.handleCreateMCPServer)
+
+				authed.GET("/dramas", h.handleListDramas)
+				authed.POST("/dramas", h.handleCreateDrama)
+				authed.GET("/dramas/:id", h.handleGetDrama)
+				authed.POST("/dramas/:id/start", h.handleStartDramaOrchestrator)
+				authed.POST("/dramas/:id/episodes/:episodeId/jianying-draft", h.handleExportJianyingDraft)
 			}
 
 			admin := v1.Group("/admin")

@@ -106,6 +106,19 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 7,
+		Name:    "007_phase7_drama_pipeline",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.DramaProject{},
+				&model.DramaCast{},
+				&model.DramaEpisode{},
+				&model.DramaShot{},
+				&model.DramaSegment{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {

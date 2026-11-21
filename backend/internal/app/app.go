@@ -14,6 +14,7 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/outbound"
 	"github.com/smartinbox17-droid/canvas/backend/internal/payment"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
+	"github.com/smartinbox17-droid/canvas/backend/internal/production"
 	"github.com/smartinbox17-droid/canvas/backend/internal/repository"
 	"github.com/smartinbox17-droid/canvas/backend/internal/skills"
 	"github.com/smartinbox17-droid/canvas/backend/internal/storage"
@@ -34,6 +35,7 @@ type Application struct {
 	Canvas      *canvas.Service
 	Skills      *skills.Service
 	Agent       *agent.Service
+	Production  *production.Service
 	ready       atomic.Bool
 }
 
@@ -88,6 +90,7 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		Canvas:      canvasSvc,
 		Skills:      skillsSvc,
 		Agent:       agentSvc,
+		Production:  production.NewService(db, canvasSvc),
 	}
 	a.ready.Store(true)
 	return a, nil

@@ -608,13 +608,90 @@ func TestPhase6SkillsAgentApprovalUndoAndMCP(t *testing.T) {
 	}
 }
 
+func TestPhase7DramaPipelineTailFrameChainingAndJianyingDraft(t *testing.T) {
+	_, router := newTestApp(t)
+	cookie := registerUser(t, router, "showrunner@example.com", "password123")
+
+	// 1. Create a short drama project -> auto-extracts Story Bible, Cast sheets, Episode 1, and 3 Shots (4s + 5s + 4s = 13s)
+	createBody, _ := json.Marshal(map[string]any{
+		"title":        "赛博雨夜追缉令",
+		"rawScript":    "第一集：林零在雨夜高架桥下收到神秘通讯，转身迎战巡逻无人机。",
+		"pacingPreset": "fast_hook",
+	})
+	cReq := httptest.NewRequest(http.MethodPost, "/api/v1/dramas", bytes.NewReader(createBody))
+	cReq.Header.Set("Content-Type", "application/json")
+	cReq.AddCookie(cookie)
+	cRec := httptest.NewRecorder()
+	router.ServeHTTP(cRec, cReq)
+	if cRec.Code != http.StatusOK {
+		t.Fatalf("create drama failed (%d): %s", cRec.Code, cRec.Body.String())
+	}
+	var cEnv kernel.Envelope[struct {
+		Drama struct {
+			ID string `json:"id"`
+		} `json:"drama"`
+		Episodes []struct {
+			ID string `json:"id"`
+		} `json:"episodes"`
+		Shots []any `json:"shots"`
+	}]
+	_ = json.Unmarshal(cRec.Body.Bytes(), &cEnv)
+	dramaID := cEnv.Data.Drama.ID
+	episodeID := cEnv.Data.Episodes[0].ID
+	if len(cEnv.Data.Shots) != 3 {
+		t.Fatalf("expected 3 structured shots, got %d", len(cEnv.Data.Shots))
+	}
+
+	// 2. Run Drama Orchestrator -> slices 13s shots into 2 segments (9s + 4s <= 10s), chains Segment 1 tail frame to Segment 2 first frame, composes SRT, and syncs to Infinite Canvas
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/dramas/"+dramaID+"/start", nil)
+	startReq.AddCookie(cookie)
+	startRec := httptest.NewRecorder()
+	router.ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start drama orchestrator failed (%d): %s", startRec.Code, startRec.Body.String())
+	}
+	var runEnv kernel.Envelope[struct {
+		Drama struct {
+			Stage           string `json:"stage"`
+			CanvasProjectID string `json:"canvasProjectId"`
+		} `json:"drama"`
+		Segments []struct {
+			SegmentIndex  int    `json:"segmentIndex"`
+			DurationSec   int    `json:"durationSec"`
+			FirstFrameURL string `json:"firstFrameUrl"`
+			TailFrameURL  string `json:"tailFrameUrl"`
+		} `json:"segments"`
+	}]
+	_ = json.Unmarshal(startRec.Body.Bytes(), &runEnv)
+	if runEnv.Data.Drama.Stage != "completed" || len(runEnv.Data.Segments) != 2 {
+		t.Fatalf("expected 2 sliced segments and stage=completed, got %+v", runEnv.Data)
+	}
+	// Verify tail-frame chaining: Segment 2's FirstFrameURL must equal Segment 1's TailFrameURL
+	if runEnv.Data.Segments[1].FirstFrameURL != runEnv.Data.Segments[0].TailFrameURL {
+		t.Fatalf("tail-frame chaining broken: seg1.tail=%s != seg2.first=%s",
+			runEnv.Data.Segments[0].TailFrameURL, runEnv.Data.Segments[1].FirstFrameURL)
+	}
+	if runEnv.Data.Drama.CanvasProjectID == "" {
+		t.Fatal("expected bi-directional canvas project sync")
+	}
+
+	// 3. Export Jianying Draft + SRT subtitles
+	jyReq := httptest.NewRequest(http.MethodPost, "/api/v1/dramas/"+dramaID+"/episodes/"+episodeID+"/jianying-draft", nil)
+	jyReq.AddCookie(cookie)
+	jyRec := httptest.NewRecorder()
+	router.ServeHTTP(jyRec, jyReq)
+	if jyRec.Code != http.StatusOK || !strings.Contains(jyRec.Body.String(), "jianying.draft/v1") {
+		t.Fatalf("export jianying draft failed (%d): %s", jyRec.Code, jyRec.Body.String())
+	}
+}
+
 func TestArchitectureLayering(t *testing.T) {
 	forbidden := []string{
 		"github.com/smartinbox17-droid/canvas/backend/internal/app",
 		"github.com/smartinbox17-droid/canvas/backend/internal/service",
 		"github.com/smartinbox17-droid/canvas/backend/internal/handler",
 	}
-	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas", "../skills", "../agent"}
+	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas", "../skills", "../agent", "../production"}
 	fset := token.NewFileSet()
 
 	for _, dir := range pkgs {
