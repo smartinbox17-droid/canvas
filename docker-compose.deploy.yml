@@ -23,8 +23,8 @@ services:
 
   migrate:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     command: ["/usr/local/bin/migrate-schema", "up"]
     environment:
       CANVAS_DATABASE_DRIVER: postgres
@@ -44,29 +44,28 @@ services:
       YINGCE_AGENT_PORT: "8090"
       YINGCE_AGENT_TOKEN: ${YINGCE_AGENT_TOKEN:-prod_agent_token}
       YINGCE_AGENT_MAX_SESSIONS: "8"
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 4G
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     environment:
       CANVAS_BACKEND_ADDR: ":8080"
+      CANVAS_DATA_PATH: "/app/data"
       CANVAS_DATABASE_DRIVER: postgres
       DATABASE_URL: postgres://canvas:${POSTGRES_PASSWORD:-canvas_prod_password}@postgres:5432/canvas?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       CANVAS_AUTO_MIGRATE: "false"
       CANVAS_REGISTRATION_ENABLED: ${CANVAS_REGISTRATION_ENABLED:-true}
+      CANVAS_ALLOW_PRIVATE_UPSTREAMS: ${CANVAS_ALLOW_PRIVATE_UPSTREAMS:-true}
+      CANVAS_CORS_ORIGINS: ${CANVAS_CORS_ORIGINS:-http://localhost:3003,http://127.0.0.1:3003}
       YINGCE_AGENT_URL: http://yingce-agent:8090
       YINGCE_AGENT_TOKEN: ${YINGCE_AGENT_TOKEN:-prod_agent_token}
     volumes:
       - canvasdata:/app/data
-      - /run/open-ai-canvas-updater:/run/open-ai-canvas-updater
+      # Optional on Linux servers when using scripts/host-updater.sh:
+      # - /run/open-ai-canvas-updater:/run/open-ai-canvas-updater
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -81,7 +80,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${CANVAS_WEB_PORT:-3003}:80"
     depends_on:
       - backend
 
