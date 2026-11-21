@@ -2,11 +2,14 @@ package app
 
 import (
 	"context"
+	"net/http"
 	"sync/atomic"
 
 	"github.com/smartinbox17-droid/canvas/backend/internal/assets"
 	"github.com/smartinbox17-droid/canvas/backend/internal/auth"
 	"github.com/smartinbox17-droid/canvas/backend/internal/database"
+	"github.com/smartinbox17-droid/canvas/backend/internal/generation"
+	"github.com/smartinbox17-droid/canvas/backend/internal/outbound"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
 	"github.com/smartinbox17-droid/canvas/backend/internal/repository"
 	"github.com/smartinbox17-droid/canvas/backend/internal/storage"
@@ -22,6 +25,7 @@ type Application struct {
 	Storage     storage.Provider
 	Auth        *auth.Service
 	Assets      *assets.Service
+	Generation  *generation.Service
 	ready       atomic.Bool
 }
 
@@ -46,6 +50,13 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		return nil, err
 	}
 
+	var httpClient *http.Client
+	if cfg.AllowPrivateUpstreams {
+		httpClient = &http.Client{}
+	} else {
+		httpClient = outbound.NewSafeHTTPClient(outbound.NewGuardConfig(cfg.AllowPrivateUpstreams, cfg.AllowedPrivateHosts))
+	}
+
 	a := &Application{
 		Config:      cfg,
 		DB:          db,
@@ -55,6 +66,7 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		Storage:     localStore,
 		Auth:        auth.NewService(db),
 		Assets:      assets.NewService(db, localStore),
+		Generation:  generation.NewService(db, coord, secretBox, httpClient),
 	}
 	a.ready.Store(true)
 	return a, nil

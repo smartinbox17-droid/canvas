@@ -21,17 +21,19 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/kernel"
 	"github.com/smartinbox17-droid/canvas/backend/internal/outbound"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
+	"github.com/smartinbox17-droid/canvas/backend/internal/protocol"
 	"github.com/smartinbox17-droid/canvas/backend/internal/service"
 )
 
 func newTestApp(t *testing.T) (*service.Application, http.Handler) {
 	t.Helper()
 	cfg := platform.Config{
-		DatabaseDriver:      "sqlite",
-		DataDir:             t.TempDir(),
-		AutoMigrate:         true,
-		RegistrationEnabled: true,
-		CORSOrigins:         []string{"http://localhost:3000"},
+		DatabaseDriver:        "sqlite",
+		DataDir:               t.TempDir(),
+		AutoMigrate:           true,
+		RegistrationEnabled:   true,
+		AllowPrivateUpstreams: true,
+		CORSOrigins:           []string{"http://localhost:3000"},
 	}
 	db, err := database.Open(cfg)
 	if err != nil {
@@ -83,7 +85,6 @@ func TestHealthAndEnvelopeContract(t *testing.T) {
 func TestPhase1AuthIsolationAndAssetReferenceGuard(t *testing.T) {
 	app, router := newTestApp(t)
 
-	// 1. SecretBox round-trip verification
 	cipherText, err := app.SecretBox.Encrypt("sk-live-secret-key")
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
@@ -93,11 +94,9 @@ func TestPhase1AuthIsolationAndAssetReferenceGuard(t *testing.T) {
 		t.Fatalf("decrypt mismatch: %v %q", err, plainText)
 	}
 
-	// 2. Register User A (first user becomes admin + receives 100 credits) and User B
 	cookieA := registerUser(t, router, "alice@example.com", "password123")
 	cookieB := registerUser(t, router, "bob@example.com", "password123")
 
-	// 3. User A uploads a PNG image asset
 	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0x01, 0x02, 0x03}
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
@@ -123,7 +122,6 @@ func TestPhase1AuthIsolationAndAssetReferenceGuard(t *testing.T) {
 		t.Fatalf("unexpected uploaded asset: %+v", upEnv.Data)
 	}
 
-	// 4. Cross-user access by User B must return 403 FORBIDDEN
 	delByB := httptest.NewRequest(http.MethodDelete, "/api/v1/assets/"+assetID, nil)
 	delByB.AddCookie(cookieB)
 	recByB := httptest.NewRecorder()
@@ -132,7 +130,6 @@ func TestPhase1AuthIsolationAndAssetReferenceGuard(t *testing.T) {
 		t.Fatalf("expected 403 when user B deletes user A asset, got %d: %s", recByB.Code, recByB.Body.String())
 	}
 
-	// 5. Bind reference to a canvas node -> deletion by owner User A must return 409 ASSET_IN_USE
 	if err := app.Assets.BindReference(context.Background(), assetID, "canvas_node", "node_1"); err != nil {
 		t.Fatalf("bind reference: %v", err)
 	}
@@ -147,6 +144,118 @@ func TestPhase1AuthIsolationAndAssetReferenceGuard(t *testing.T) {
 	_ = json.Unmarshal(recInUse.Body.Bytes(), &envInUse)
 	if envInUse.Reason != kernel.ReasonAssetInUse {
 		t.Fatalf("expected ASSET_IN_USE reason, got %s", envInUse.Reason)
+	}
+}
+
+func TestPhase2DeclarativeDSLAndTaskDispatchLifecycle(t *testing.T) {
+	// 1. Verify $-expression DSL operators ($ref, $coalesce, $omitEmpty, $toString, $filter, $sortByOrder, $if, $len)
+	scope := map[string]any{
+		"request": map[string]any{
+			"model":       "sora-2",
+			"prompt":      "cyberpunk neon city",
+			"duration":    8,
+			"aspectRatio": "",
+			"images": []any{
+				map[string]any{"id": "img2", "role": "mask", "order": 2},
+				map[string]any{"id": "img1", "role": "first_frame", "order": 1},
+			},
+		},
+	}
+	expr := map[string]any{
+		"model":   map[string]any{"$ref": "request.model"},
+		"seconds": map[string]any{"$toString": map[string]any{"$ref": "request.duration"}},
+		"size":    map[string]any{"$omitEmpty": map[string]any{"$ref": "request.aspectRatio"}},
+		"refs": map[string]any{
+			"$filter": map[string]any{
+				"from":  map[string]any{"$sortByOrder": map[string]any{"$ref": "request.images"}},
+				"as":    "media",
+				"where": map[string]any{"$ne": []any{map[string]any{"$ref": "media.role"}, "mask"}},
+			},
+		},
+	}
+	evaluated, err := protocol.Eval(expr, scope)
+	if err != nil {
+		t.Fatalf("DSL Eval failed: %v", err)
+	}
+	evMap, _ := evaluated.(map[string]any)
+	if evMap["model"] != "sora-2" || evMap["seconds"] != "8" {
+		t.Fatalf("unexpected evaluated fields: %+v", evMap)
+	}
+	if _, hasSize := evMap["size"]; hasSize {
+		t.Fatalf("expected $omitEmpty to remove empty size key: %+v", evMap)
+	}
+	refs, _ := evMap["refs"].([]any)
+	if len(refs) != 1 {
+		t.Fatalf("expected $filter to keep 1 non-mask image, got %d", len(refs))
+	}
+
+	// 2. End-to-end task submission, idempotency, worker lease claim, mock plugin execution, billing settlement, and SSE text-events
+	app, router := newTestApp(t)
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	manifestPath := filepath.Clean("../../../plugin-packages/mock-echo/manifest.json")
+	if err := app.Generation.BootstrapMockCatalog(context.Background(), manifestPath, srv.URL+"/api/mock-upstream"); err != nil {
+		t.Fatalf("bootstrap mock catalog: %v", err)
+	}
+
+	cookie := registerUser(t, router, "creator@example.com", "password123")
+
+	submitBody, _ := json.Marshal(map[string]any{
+		"creationSubmissionId": "idem-sub-001",
+		"projectId":            "proj_1",
+		"logicalModelId":       "mock-gpt-4o",
+		"operation":            "text_generation",
+		"request": map[string]any{
+			"capability": "text",
+			"model":      "mock-gpt-4o",
+			"prompt":     "写一段赛博朋克短剧开场白",
+		},
+	})
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", bytes.NewReader(submitBody))
+	req1.Header.Set("Content-Type", "application/json")
+	req1.AddCookie(cookie)
+	rec1 := httptest.NewRecorder()
+	router.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("submit task failed (%d): %s", rec1.Code, rec1.Body.String())
+	}
+	var env1 kernel.Envelope[map[string]map[string]any]
+	_ = json.Unmarshal(rec1.Body.Bytes(), &env1)
+	taskID, _ := env1.Data["task"]["id"].(string)
+	if taskID == "" || env1.Data["task"]["status"] != "queued" {
+		t.Fatalf("unexpected task response: %+v", env1.Data)
+	}
+
+	// Idempotent duplicate submission returns exact same task without double-reserving credits
+	reqDup := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", bytes.NewReader(submitBody))
+	reqDup.Header.Set("Content-Type", "application/json")
+	reqDup.AddCookie(cookie)
+	recDup := httptest.NewRecorder()
+	router.ServeHTTP(recDup, reqDup)
+	var envDup kernel.Envelope[map[string]map[string]any]
+	_ = json.Unmarshal(recDup.Body.Bytes(), &envDup)
+	if envDup.Data["task"]["id"] != taskID {
+		t.Fatalf("idempotency broken: expected %s, got %v", taskID, envDup.Data["task"]["id"])
+	}
+
+	// Claim and execute via worker
+	processed, err := app.Generation.ProcessNextTask(context.Background())
+	if err != nil || processed == nil {
+		t.Fatalf("ProcessNextTask failed: %v", err)
+	}
+	if processed.Status != "succeeded" {
+		t.Fatalf("expected task succeeded, got %s (error=%s)", processed.Status, processed.Error)
+	}
+
+	// Verify SSE text-events stream with Last-Event-ID cursor resumption
+	sseReq := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/"+taskID+"/text-events", nil)
+	sseReq.Header.Set("Last-Event-ID", "1")
+	sseReq.AddCookie(cookie)
+	sseRec := httptest.NewRecorder()
+	router.ServeHTTP(sseRec, sseReq)
+	if sseRec.Code != http.StatusOK || !strings.Contains(sseRec.Body.String(), "event: done") {
+		t.Fatalf("unexpected SSE output (%d): %s", sseRec.Code, sseRec.Body.String())
 	}
 }
 
@@ -208,13 +317,12 @@ func TestOutboundSSRFGuard(t *testing.T) {
 }
 
 func TestArchitectureLayering(t *testing.T) {
-	// Guard rule: domain/foundation packages must NEVER import internal/app, internal/service, or internal/handler.
 	forbidden := []string{
 		"github.com/smartinbox17-droid/canvas/backend/internal/app",
 		"github.com/smartinbox17-droid/canvas/backend/internal/service",
 		"github.com/smartinbox17-droid/canvas/backend/internal/handler",
 	}
-	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets"}
+	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation"}
 	fset := token.NewFileSet()
 
 	for _, dir := range pkgs {

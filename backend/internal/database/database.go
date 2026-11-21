@@ -53,6 +53,21 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 3,
+		Name:    "003_phase2_protocol_channels_routes_tasks",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.PluginInstallation{},
+				&model.ModelChannel{},
+				&model.ChannelModel{},
+				&model.LogicalModel{},
+				&model.LogicalModelRevision{},
+				&model.LogicalModelRoute{},
+				&model.TaskTextEvent{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {

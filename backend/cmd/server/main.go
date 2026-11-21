@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -34,6 +35,22 @@ func main() {
 	}
 	defer func() { _ = app.Close() }()
 
+	// Bootstrap local mock plugin catalog if available
+	for _, candidate := range []string{
+		"../plugin-packages/mock-echo/manifest.json",
+		"plugin-packages/mock-echo/manifest.json",
+	} {
+		if _, statErr := os.Stat(filepath.Clean(candidate)); statErr == nil {
+			mockBase := "http://localhost" + cfg.Addr + "/api/mock-upstream"
+			_ = app.Generation.BootstrapMockCatalog(context.Background(), candidate, mockBase)
+			break
+		}
+	}
+
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
+	app.Generation.StartBackgroundWorkers(workerCtx, cfg.WorkerConcurrency)
+
 	h := handler.New(app)
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -53,6 +70,7 @@ func main() {
 	<-stop
 
 	app.SetReady(false)
+	cancelWorkers()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

@@ -2,15 +2,20 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/smartinbox17-droid/canvas/backend/internal/assets"
 	"github.com/smartinbox17-droid/canvas/backend/internal/auth"
+	"github.com/smartinbox17-droid/canvas/backend/internal/generation"
 	"github.com/smartinbox17-droid/canvas/backend/internal/kernel"
 	"github.com/smartinbox17-droid/canvas/backend/internal/model"
+	"github.com/smartinbox17-droid/canvas/backend/internal/protocol"
 	"github.com/smartinbox17-droid/canvas/backend/internal/service"
 )
 
@@ -38,6 +43,13 @@ func (h *Handler) NewRouter() *gin.Engine {
 			health.GET("/ready", h.handleReady)
 		}
 
+		// Local built-in mock upstream for zero-cost development and CI testing
+		mockUp := api.Group("/mock-upstream")
+		{
+			mockUp.POST("/v1/generations", h.handleMockUpstreamCreate)
+			mockUp.GET("/v1/generations/:taskId", h.handleMockUpstreamPoll)
+		}
+
 		v1 := api.Group("/v1")
 		{
 			authGroup := v1.Group("/auth")
@@ -49,6 +61,8 @@ func (h *Handler) NewRouter() *gin.Engine {
 				authGroup.POST("/logout", h.handleLogout)
 			}
 
+			v1.GET("/models", h.handleListLogicalModels)
+
 			authed := v1.Group("")
 			authed.Use(h.requireAuth())
 			{
@@ -58,6 +72,13 @@ func (h *Handler) NewRouter() *gin.Engine {
 				authed.DELETE("/assets/:id", h.handleDeleteAsset)
 				authed.GET("/asset-folders", h.handleListAssetFolders)
 				authed.POST("/asset-folders", h.handleCreateAssetFolder)
+
+				authed.POST("/tasks/quote", h.handleTaskQuote)
+				authed.POST("/tasks", h.handleCreateTask)
+				authed.GET("/tasks", h.handleListTasks)
+				authed.GET("/tasks/:id", h.handleGetTask)
+				authed.POST("/tasks/:id/cancel", h.handleCancelTask)
+				authed.GET("/tasks/:id/text-events", h.handleTaskTextEventsSSE)
 			}
 		}
 	}
@@ -166,6 +187,191 @@ func (h *Handler) handleLogout(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(auth.SessionCookieName, "", -1, "/", "", false, true)
 	kernel.OK(c, gin.H{"loggedOut": true})
+}
+
+func (h *Handler) handleListLogicalModels(c *gin.Context) {
+	models, err := h.app.Generation.ListLogicalModels(c.Request.Context())
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"items": models})
+}
+
+type taskSubmitPayload struct {
+	CreationSubmissionID string                     `json:"creationSubmissionId"`
+	ProjectID            string                     `json:"projectId"`
+	LogicalModelCode     string                     `json:"logicalModelId"`
+	Operation            string                     `json:"operation"`
+	Request              protocol.GenerationRequest `json:"request"`
+}
+
+func (h *Handler) handleTaskQuote(c *gin.Context) {
+	var body taskSubmitPayload
+	if err := c.ShouldBindJSON(&body); err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, "invalid json payload"))
+		return
+	}
+	modelCode := body.LogicalModelCode
+	if modelCode == "" {
+		modelCode = body.Request.Model
+	}
+	quote, err := h.app.Generation.Quote(c.Request.Context(), modelCode, body.Request)
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusServiceUnavailable, 503, kernel.ReasonRouteUnavailable, err.Error()))
+		return
+	}
+	kernel.OK(c, quote)
+}
+
+func (h *Handler) handleCreateTask(c *gin.Context) {
+	user := currentUser(c)
+	var body taskSubmitPayload
+	if err := c.ShouldBindJSON(&body); err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusBadRequest, 400, kernel.ReasonInvalidArgument, "invalid json payload"))
+		return
+	}
+	subID := body.CreationSubmissionID
+	if subID == "" {
+		subID = strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	}
+	task, err := h.app.Generation.SubmitTask(c.Request.Context(), generation.SubmitTaskInput{
+		UserID:               user.ID,
+		ProjectID:            body.ProjectID,
+		CreationSubmissionID: subID,
+		LogicalModelCode:     body.LogicalModelCode,
+		Operation:            body.Operation,
+		Request:              body.Request,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, generation.ErrInsufficientCredits):
+			kernel.Fail(c, kernel.NewError(http.StatusPaymentRequired, 402, kernel.ReasonInsufficientCredits, err.Error()))
+		case errors.Is(err, generation.ErrRouteUnavailable):
+			kernel.Fail(c, kernel.NewError(http.StatusServiceUnavailable, 503, kernel.ReasonRouteUnavailable, err.Error()))
+		case errors.Is(err, generation.ErrForbidden):
+			kernel.Fail(c, kernel.NewError(http.StatusForbidden, 403, kernel.ReasonForbidden, err.Error()))
+		default:
+			kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		}
+		return
+	}
+	kernel.OK(c, gin.H{"task": task})
+}
+
+func (h *Handler) handleListTasks(c *gin.Context) {
+	user := currentUser(c)
+	items, err := h.app.Generation.ListTasks(c.Request.Context(), user.ID)
+	if err != nil {
+		kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		return
+	}
+	kernel.OK(c, gin.H{"items": items})
+}
+
+func (h *Handler) handleGetTask(c *gin.Context) {
+	user := currentUser(c)
+	task, err := h.app.Generation.GetTask(c.Request.Context(), user.ID, c.Param("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, generation.ErrForbidden):
+			kernel.Fail(c, kernel.NewError(http.StatusForbidden, 403, kernel.ReasonForbidden, err.Error()))
+		case errors.Is(err, generation.ErrTaskNotFound):
+			kernel.Fail(c, kernel.NewError(http.StatusNotFound, 404, kernel.ReasonNotFound, err.Error()))
+		default:
+			kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		}
+		return
+	}
+	kernel.OK(c, gin.H{"task": task})
+}
+
+func (h *Handler) handleCancelTask(c *gin.Context) {
+	user := currentUser(c)
+	task, err := h.app.Generation.CancelTask(c.Request.Context(), user.ID, c.Param("id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, generation.ErrForbidden):
+			kernel.Fail(c, kernel.NewError(http.StatusForbidden, 403, kernel.ReasonForbidden, err.Error()))
+		case errors.Is(err, generation.ErrTaskNotFound):
+			kernel.Fail(c, kernel.NewError(http.StatusNotFound, 404, kernel.ReasonNotFound, err.Error()))
+		default:
+			kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		}
+		return
+	}
+	kernel.OK(c, gin.H{"task": task})
+}
+
+// handleTaskTextEventsSSE streams cursor-based text events supporting Last-Event-ID or ?afterSeq= resumption.
+func (h *Handler) handleTaskTextEventsSSE(c *gin.Context) {
+	user := currentUser(c)
+	afterSeq := 0
+	if raw := strings.TrimSpace(c.GetHeader("Last-Event-ID")); raw != "" {
+		afterSeq, _ = strconv.Atoi(raw)
+	} else if q := strings.TrimSpace(c.Query("afterSeq")); q != "" {
+		afterSeq, _ = strconv.Atoi(q)
+	}
+
+	events, err := h.app.Generation.ListTextEventsAfter(c.Request.Context(), user.ID, c.Param("id"), afterSeq)
+	if err != nil {
+		switch {
+		case errors.Is(err, generation.ErrForbidden):
+			kernel.Fail(c, kernel.NewError(http.StatusForbidden, 403, kernel.ReasonForbidden, err.Error()))
+		case errors.Is(err, generation.ErrTaskNotFound):
+			kernel.Fail(c, kernel.NewError(http.StatusNotFound, 404, kernel.ReasonNotFound, err.Error()))
+		default:
+			kernel.Fail(c, kernel.NewError(http.StatusInternalServerError, 500, kernel.ReasonInternalError, err.Error()))
+		}
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+
+	for _, ev := range events {
+		_, _ = fmt.Fprintf(c.Writer, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Event, ev.DataJSON)
+	}
+	c.Writer.Flush()
+}
+
+func (h *Handler) handleMockUpstreamCreate(c *gin.Context) {
+	var body map[string]any
+	_ = c.ShouldBindJSON(&body)
+	capStr, _ := body["capability"].(string)
+	prompt, _ := body["prompt"].(string)
+	id := "mock_up_" + uuid.NewString()[:8]
+
+	switch capStr {
+	case "image":
+		c.JSON(http.StatusOK, gin.H{
+			"id":     id,
+			"status": "succeeded",
+			"images": []string{"https://placehold.co/1024x1024/2563eb/ffffff.png?text=Mock+AI+Image"},
+		})
+	case "video":
+		c.JSON(http.StatusOK, gin.H{
+			"id":     id,
+			"status": "succeeded",
+			"videos": []string{"https://www.w3schools.com/html/mov_bbb.mp4"},
+		})
+	default:
+		c.JSON(http.StatusOK, gin.H{
+			"id":     id,
+			"status": "succeeded",
+			"text":   fmt.Sprintf("【Mock AI 创作结果】已根据提示词生成：%s", prompt),
+		})
+	}
+}
+
+func (h *Handler) handleMockUpstreamPoll(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"id":     c.Param("taskId"),
+		"status": "succeeded",
+	})
 }
 
 func (h *Handler) handleListAssetFolders(c *gin.Context) {
