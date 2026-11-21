@@ -39,6 +39,20 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 2,
+		Name:    "002_phase1_auth_storage_assets",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.SystemSetting{},
+				&model.LoginLog{},
+				&model.AssetFolder{},
+				&model.Asset{},
+				&model.AssetReference{},
+				&model.StorageDeleteOutbox{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {

@@ -4,9 +4,12 @@ import (
 	"context"
 	"sync/atomic"
 
+	"github.com/smartinbox17-droid/canvas/backend/internal/assets"
+	"github.com/smartinbox17-droid/canvas/backend/internal/auth"
 	"github.com/smartinbox17-droid/canvas/backend/internal/database"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
 	"github.com/smartinbox17-droid/canvas/backend/internal/repository"
+	"github.com/smartinbox17-droid/canvas/backend/internal/storage"
 	"gorm.io/gorm"
 )
 
@@ -15,6 +18,10 @@ type Application struct {
 	DB          *gorm.DB
 	Repo        *repository.Repository
 	Coordinator platform.Coordinator
+	SecretBox   *platform.SecretBox
+	Storage     storage.Provider
+	Auth        *auth.Service
+	Assets      *assets.Service
 	ready       atomic.Bool
 }
 
@@ -30,11 +37,24 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 			return nil, err
 		}
 	}
+	secretBox, err := platform.LoadOrCreateSecretBox(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	localStore, err := storage.NewLocalStore(cfg.DataDir, "/api/v1/assets/files")
+	if err != nil {
+		return nil, err
+	}
+
 	a := &Application{
 		Config:      cfg,
 		DB:          db,
 		Repo:        repository.New(db),
 		Coordinator: coord,
+		SecretBox:   secretBox,
+		Storage:     localStore,
+		Auth:        auth.NewService(db),
+		Assets:      assets.NewService(db, localStore),
 	}
 	a.ready.Store(true)
 	return a, nil

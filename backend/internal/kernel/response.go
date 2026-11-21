@@ -20,6 +20,8 @@ const (
 	ReasonInsufficientCredits ErrorReason = "INSUFFICIENT_CREDITS"
 	ReasonRouteUnavailable    ErrorReason = "ROUTE_UNAVAILABLE"
 	ReasonUpstreamBlocked     ErrorReason = "UPSTREAM_BLOCKED"
+	ReasonAssetInUse          ErrorReason = "ASSET_IN_USE"
+	ReasonQuotaExceeded       ErrorReason = "QUOTA_EXCEEDED"
 	ReasonInternalError       ErrorReason = "INTERNAL_ERROR"
 	ReasonServiceNotReady     ErrorReason = "SERVICE_NOT_READY"
 )
