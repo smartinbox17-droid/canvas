@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"github.com/smartinbox17-droid/canvas/backend/internal/agent"
 	"github.com/smartinbox17-droid/canvas/backend/internal/assets"
 	"github.com/smartinbox17-droid/canvas/backend/internal/auth"
 	"github.com/smartinbox17-droid/canvas/backend/internal/canvas"
@@ -14,6 +15,7 @@ import (
 	"github.com/smartinbox17-droid/canvas/backend/internal/payment"
 	"github.com/smartinbox17-droid/canvas/backend/internal/platform"
 	"github.com/smartinbox17-droid/canvas/backend/internal/repository"
+	"github.com/smartinbox17-droid/canvas/backend/internal/skills"
 	"github.com/smartinbox17-droid/canvas/backend/internal/storage"
 	"gorm.io/gorm"
 )
@@ -30,6 +32,8 @@ type Application struct {
 	Generation  *generation.Service
 	Payment     *payment.Service
 	Canvas      *canvas.Service
+	Skills      *skills.Service
+	Agent       *agent.Service
 	ready       atomic.Bool
 }
 
@@ -64,6 +68,12 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 	paySvc := payment.NewService(db, secretBox)
 	_ = paySvc.BootstrapDefaults(context.Background())
 
+	skillsSvc := skills.NewService(db)
+	_ = skillsSvc.BootstrapBuiltins(context.Background())
+
+	canvasSvc := canvas.NewService(db)
+	agentSvc := agent.NewService(db, canvasSvc)
+
 	a := &Application{
 		Config:      cfg,
 		DB:          db,
@@ -75,7 +85,9 @@ func New(cfg platform.Config, db *gorm.DB, coord platform.Coordinator) (*Applica
 		Assets:      assets.NewService(db, localStore),
 		Generation:  generation.NewService(db, coord, secretBox, httpClient),
 		Payment:     paySvc,
-		Canvas:      canvas.NewService(db),
+		Canvas:      canvasSvc,
+		Skills:      skillsSvc,
+		Agent:       agentSvc,
 	}
 	a.ready.Store(true)
 	return a, nil

@@ -91,6 +91,21 @@ var BuiltinMigrations = []MigrationStep{
 			)
 		},
 	},
+	{
+		Version: 6,
+		Name:    "006_phase5_6_skills_agent_mcp",
+		Apply: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(
+				&model.Skill{},
+				&model.CloudAgentConversation{},
+				&model.CloudAgentRun{},
+				&model.CloudAgentEvent{},
+				&model.CloudAgentApproval{},
+				&model.AgentMemoryDocument{},
+				&model.MCPServerConfig{},
+			)
+		},
+	},
 }
 
 func Open(cfg platform.Config) (*gorm.DB, error) {

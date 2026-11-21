@@ -505,13 +505,116 @@ func TestOutboundSSRFGuard(t *testing.T) {
 	}
 }
 
+func TestPhase6SkillsAgentApprovalUndoAndMCP(t *testing.T) {
+	_, router := newTestApp(t)
+	cookie := registerUser(t, router, "agent_user@example.com", "password123")
+
+	// 1. List built-in skills and create a custom multi-file Skill IDE skill
+	skListReq := httptest.NewRequest(http.MethodGet, "/api/v1/skills", nil)
+	skListReq.AddCookie(cookie)
+	skListRec := httptest.NewRecorder()
+	router.ServeHTTP(skListRec, skListReq)
+	if skListRec.Code != http.StatusOK || !strings.Contains(skListRec.Body.String(), "skill_builtin_storyboard_director") {
+		t.Fatalf("list skills failed (%d): %s", skListRec.Code, skListRec.Body.String())
+	}
+
+	newSkillBody, _ := json.Marshal(map[string]any{
+		"name":         "赛博朋克霓虹调色技能",
+		"category":     "image",
+		"outputMode":   "image_prompt",
+		"description":  "自动注入青橙冷暖对比光效",
+		"systemPrompt": "Add teal and orange neon cyberpunk lighting.",
+		"files":        map[string]string{"SKILL.md": "# Cyberpunk Color Grade"},
+	})
+	skCreateReq := httptest.NewRequest(http.MethodPost, "/api/v1/skills", bytes.NewReader(newSkillBody))
+	skCreateReq.Header.Set("Content-Type", "application/json")
+	skCreateReq.AddCookie(cookie)
+	skCreateRec := httptest.NewRecorder()
+	router.ServeHTTP(skCreateRec, skCreateReq)
+	if skCreateRec.Code != http.StatusOK {
+		t.Fatalf("create skill failed (%d): %s", skCreateRec.Code, skCreateRec.Body.String())
+	}
+
+	// 2. Provision a starter canvas project so the Agent can mutate it and record inverse operations
+	listProjReq := httptest.NewRequest(http.MethodGet, "/api/v1/canvas-projects", nil)
+	listProjReq.AddCookie(cookie)
+	listProjRec := httptest.NewRecorder()
+	router.ServeHTTP(listProjRec, listProjReq)
+	var projEnv kernel.Envelope[struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}]
+	_ = json.Unmarshal(listProjRec.Body.Bytes(), &projEnv)
+	projectID := projEnv.Data.Items[0].ID
+
+	// 3. Start an Agent run requiring approval -> pauses at waiting_approval
+	runBody, _ := json.Marshal(map[string]any{
+		"projectId":       projectID,
+		"prompt":          "批量创建雨夜追逐戏分镜节点并等待审批",
+		"requireApproval": true,
+	})
+	runReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/runs", bytes.NewReader(runBody))
+	runReq.Header.Set("Content-Type", "application/json")
+	runReq.AddCookie(cookie)
+	runRec := httptest.NewRecorder()
+	router.ServeHTTP(runRec, runReq)
+	if runRec.Code != http.StatusOK {
+		t.Fatalf("start agent run failed (%d): %s", runRec.Code, runRec.Body.String())
+	}
+	var runEnv kernel.Envelope[struct {
+		Run struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"run"`
+		Approval struct {
+			ID string `json:"id"`
+		} `json:"approval"`
+	}]
+	_ = json.Unmarshal(runRec.Body.Bytes(), &runEnv)
+	if runEnv.Data.Run.Status != "waiting_approval" || runEnv.Data.Approval.ID == "" {
+		t.Fatalf("expected waiting_approval with approvalId, got %+v", runEnv.Data)
+	}
+	runID := runEnv.Data.Run.ID
+	approvalID := runEnv.Data.Approval.ID
+
+	// 4. Approve the checkpoint -> Agent executes canvas workflow tool (canvas revision advances to 2)
+	decBody, _ := json.Marshal(map[string]any{"decision": "approve"})
+	decReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/runs/"+runID+"/approvals/"+approvalID+"/decision", bytes.NewReader(decBody))
+	decReq.Header.Set("Content-Type", "application/json")
+	decReq.AddCookie(cookie)
+	decRec := httptest.NewRecorder()
+	router.ServeHTTP(decRec, decReq)
+	if decRec.Code != http.StatusOK || !strings.Contains(decRec.Body.String(), `"status":"completed"`) {
+		t.Fatalf("approve agent run failed (%d): %s", decRec.Code, decRec.Body.String())
+	}
+
+	// 5. Undo the Agent run -> replays inverse canvas operations and marks run status="undone"
+	undoReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/runs/"+runID+"/undo", nil)
+	undoReq.AddCookie(cookie)
+	undoRec := httptest.NewRecorder()
+	router.ServeHTTP(undoRec, undoReq)
+	if undoRec.Code != http.StatusOK || !strings.Contains(undoRec.Body.String(), `"status":"undone"`) {
+		t.Fatalf("undo agent run failed (%d): %s", undoRec.Code, undoRec.Body.String())
+	}
+
+	// 6. Verify Agent SSE events stream
+	evReq := httptest.NewRequest(http.MethodGet, "/api/v1/agent/runs/"+runID+"/events", nil)
+	evReq.AddCookie(cookie)
+	evRec := httptest.NewRecorder()
+	router.ServeHTTP(evRec, evReq)
+	if evRec.Code != http.StatusOK || !strings.Contains(evRec.Body.String(), "event: run.undone") {
+		t.Fatalf("agent events SSE failed (%d): %s", evRec.Code, evRec.Body.String())
+	}
+}
+
 func TestArchitectureLayering(t *testing.T) {
 	forbidden := []string{
 		"github.com/smartinbox17-droid/canvas/backend/internal/app",
 		"github.com/smartinbox17-droid/canvas/backend/internal/service",
 		"github.com/smartinbox17-droid/canvas/backend/internal/handler",
 	}
-	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas"}
+	pkgs := []string{"../kernel", "../platform", "../outbound", "../model", "../database", "../repository", "../auth", "../storage", "../assets", "../protocol", "../generation", "../payment", "../canvas", "../skills", "../agent"}
 	fset := token.NewFileSet()
 
 	for _, dir := range pkgs {

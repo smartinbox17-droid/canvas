@@ -101,6 +101,22 @@ func (h *Handler) NewRouter() *gin.Engine {
 				authed.GET("/canvas-projects/:id/realtime", h.handleCanvasRealtimeStream)
 				authed.POST("/canvas-projects/:id/share", h.handleEnableCanvasShare)
 				authed.DELETE("/canvas-projects/:id/share", h.handleDisableCanvasShare)
+
+				authed.GET("/skills", h.handleListSkills)
+				authed.POST("/skills", h.handleCreateSkill)
+
+				authed.GET("/agent/capabilities", h.handleAgentCapabilities)
+				authed.GET("/agent/runs", h.handleListAgentRuns)
+				authed.POST("/agent/runs", h.handleStartAgentRun)
+				authed.GET("/agent/runs/:id", h.handleGetAgentRun)
+				authed.GET("/agent/runs/:id/events", h.handleAgentRunEventsSSE)
+				authed.POST("/agent/runs/:id/approvals/:approvalId/decision", h.handleAgentApprovalDecision)
+				authed.POST("/agent/runs/:id/undo", h.handleUndoAgentRun)
+				authed.GET("/agent/memories", h.handleListAgentMemories)
+				authed.POST("/agent/memories", h.handleCreateAgentMemory)
+
+				authed.GET("/mcp/servers", h.handleListMCPServers)
+				authed.POST("/mcp/servers", h.handleCreateMCPServer)
 			}
 
 			admin := v1.Group("/admin")
